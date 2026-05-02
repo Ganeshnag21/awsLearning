@@ -1,0 +1,116 @@
+# ============================================================
+# CI/CD Pipeline: Test → Build → Deploy to AWS Lambda
+# ============================================================
+#
+# TRIGGERS:
+#   - Every push to the 'main' branch
+#   - Every pull request targeting 'main' (runs tests only, no deploy)
+#
+# REQUIRED GITHUB SECRETS (Settings → Secrets → Actions):
+#   AWS_ACCESS_KEY_ID      – IAM user access key
+#   AWS_SECRET_ACCESS_KEY  – IAM user secret key
+#   AWS_REGION             – e.g. us-east-1
+# ============================================================
+
+name: CI / Deploy to AWS Lambda
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # -------------------------------------------------------
+  # JOB 1: test
+  # Runs on every push AND every pull request.
+  # If any test fails, the deploy job is blocked.
+  # -------------------------------------------------------
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest       # GitHub spins up a fresh Ubuntu VM for this job
+
+    steps:
+      # Step 1 – Download your repository code onto the VM
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 – Install the Python version we want
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Step 3 – Install pytest and other dev tools
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Step 4 – Run all tests; if any fail the job is marked failed
+      - name: Run pytest
+        run: pytest
+
+  # -------------------------------------------------------
+  # JOB 2: deploy
+  # Only runs when:
+  #   (a) the 'test' job above passed  ← needs: test
+  #   (b) this is a push to main        ← if: condition below
+  #       (NOT a pull request from a fork)
+  # -------------------------------------------------------
+  deploy:
+    name: Deploy to AWS Lambda
+    runs-on: ubuntu-latest
+    needs: test        # Wait for 'test' job to finish and pass first
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      # Step 1 – Download repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 – Install Python
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Step 3 – Install ONLY runtime dependencies into a ./package folder
+      #           (not dev tools like pytest — Lambda doesn't need them)
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt --target ./package
+
+      # Step 4 – Build the deployment zip:
+      #   • First zip everything inside ./package (third-party libs)
+      #   • Then add the src/ folder so Lambda can find src.handler.lambda_handler
+      - name: Build deployment zip
+        run: |
+          cd package
+          zip -r ../deployment-package.zip .
+          cd ..
+          zip -r deployment-package.zip src/
+
+      # Step 5 – Authenticate to AWS using secrets stored in GitHub
+      #           The 'aws-actions/configure-aws-credentials' action sets up
+      #           AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+      #           as environment variables for all subsequent steps.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 6 – Upload the zip to Lambda and make it the live version
+      - name: Deploy to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name hello-lambda \
+            --zip-file fileb://deployment-package.zip
+
+      # Step 7 – (Optional) Print the deployed version info as confirmation
+      - name: Confirm deployment
+        run: |
+          aws lambda get-function-configuration \
+            --function-name hello-lambda \
+            --query '{FunctionName: FunctionName, Runtime: Runtime, Handler: Handler, LastModified: LastModified}' \
+            --output table
