@@ -1,0 +1,4 @@
+# Lambda runtime dependencies
+# The standard library covers everything this function needs.
+# Add third-party packages here only if your handler imports them,
+# e.g.:  requests==2.32.3
